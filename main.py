@@ -465,7 +465,7 @@ async def toggle_chat(callback: CallbackQuery):
             if btn.callback_data and btn.callback_data.startswith("toggle:"):
                 cid = int(btn.callback_data.split(":")[2])
                 title = btn.text.split(" ", 1)[-1] if " " in btn.text else btn.text
-                mark = "🟢" if cid in selected else "⚪"
+                mark = "✅" if cid in selected else "⬜"
                 kb.append([InlineKeyboardButton(text=f"{mark} {title}", callback_data=btn.callback_data)])
             else:
                 kb.append([btn])
@@ -502,6 +502,7 @@ async def spam_worker(user_id: int, phone: str, session_str: str):
             chats = list(acc.get("selected_chats", []))
             text = acc.get("text", "").strip()
             interval = max(acc.get("interval", 3600), 30)
+            print(f"[{phone}] cycle start, chats={len(chats)}, interval={interval}s")
 
             if not chats or not text:
                 await asyncio.sleep(10)
