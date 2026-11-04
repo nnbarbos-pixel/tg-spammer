@@ -1,2 +1,3 @@
 aiogram
-telethon
+pyrogram
+tgcrypto
