@@ -133,7 +133,6 @@ async def add_account_start(message: Message, state: FSMContext):
 @router.message(States.waiting_phone)
 async def process_phone(message: Message, state: FSMContext):
     raw = message.text or ""
-    # чистим от всего лишнего
     phone = "".join(c for c in raw if c.isdigit() or c == "+")
     if not phone:
         return await message.answer("Не вижу номера. Введи ещё раз.")
@@ -147,59 +146,63 @@ async def process_phone(message: Message, state: FSMContext):
     await client.connect()
     try:
         sent = await client.send_code_request(phone)
-        await state.update_data(phone_code_hash=sent.phone_code_hash)
-        if not hasattr(process_phone, "clients"):
-            process_phone.clients = {}
-        process_phone.clients[phone] = client
+        # сохраняем сессию сразу, чтобы не терять при рестарте
+        session_str = client.session.save()
+        await state.update_data(
+            phone_code_hash=sent.phone_code_hash,
+            session_str=session_str
+        )
         await message.answer(f"Код отправлен на {phone}. Введи код:")
         await state.set_state(States.waiting_code)
     except Exception as e:
         await message.answer(f"Ошибка отправки кода: {e}\nПопробуй другой формат или номер.")
         await state.clear()
+    finally:
         await client.disconnect()
 
 @router.message(States.waiting_code)
 async def process_code(message: Message, state: FSMContext):
     data = await state.get_data()
     phone = data["phone"]
-    client: TelegramClient = process_phone.clients.get(phone)
-    if not client:
-        await message.answer("Сессия потеряна, начни заново.")
-        await state.clear()
-        return
+    session_str = data.get("session_str", "")
+    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+    await client.connect()
     try:
         await client.sign_in(phone, message.text.strip(), phone_code_hash=data["phone_code_hash"])
-        session_str = client.session.save()
+        final_session = client.session.save()
         user_data = get_user(message.from_user.id)
         user_data["accounts"].append({
             "phone": phone,
-            "session": session_str
+            "session": final_session
         })
         save_data()
         await message.answer(f"✅ Аккаунт {phone} добавлен.")
         await state.clear()
-        await client.disconnect()
-        process_phone.clients.pop(phone, None)
     except SessionPasswordNeededError:
         await message.answer("Введи пароль 2FA:")
         await state.set_state(States.waiting_password)
+        # сохраняем обновлённую сессию для 2FA
+        await state.update_data(session_str=client.session.save())
     except Exception as e:
         await message.answer(f"Ошибка входа: {e}")
         await state.clear()
+    finally:
         await client.disconnect()
 
 @router.message(States.waiting_password)
 async def process_password(message: Message, state: FSMContext):
     data = await state.get_data()
     phone = data["phone"]
-    client = process_phone.clients.get(phone)
+    session_str = data.get("session_str", "")
+    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+    await client.connect()
     try:
         await client.sign_in(password=message.text)
-        session_str = client.session.save()
+        final_session = client.session.save()
         user_data = get_user(message.from_user.id)
         user_data["accounts"].append({
             "phone": phone,
-            "session": session_str
+            "session": final_session
         })
         save_data()
         await message.answer(f"✅ Аккаунт {phone} добавлен (2FA).")
@@ -207,9 +210,7 @@ async def process_password(message: Message, state: FSMContext):
         await message.answer(f"Ошибка: {e}")
     finally:
         await state.clear()
-        if client:
-            await client.disconnect()
-        process_phone.clients.pop(phone, None)
+        await client.disconnect()
 
 # ========== Текст / Интервал ==========
 @router.message(F.text == "📝 Текст")
