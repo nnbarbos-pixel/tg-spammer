@@ -144,7 +144,10 @@ async def process_phone(message: Message, state: FSMContext):
         session_name,
         api_id=API_ID,
         api_hash=API_HASH,
-        workdir=SESSIONS_DIR
+        workdir=SESSIONS_DIR,
+        device_model="SpamBot",
+        system_version="1.0",
+        app_version="1.0"
     )
     await client.connect()
     try:
@@ -280,7 +283,10 @@ async def select_chats(message: Message):
         f"temp_{phone.replace('+', '')}",
         api_id=API_ID,
         api_hash=API_HASH,
-        session_string=session_str
+        session_string=session_str,
+        device_model="SpamBot",
+        system_version="1.0",
+        app_version="1.0"
     )
     await client.start()
     try:
@@ -351,7 +357,10 @@ async def spam_worker(user_id: int, phone: str, session_str: str):
         f"spam_{phone.replace('+', '')}",
         api_id=API_ID,
         api_hash=API_HASH,
-        session_string=session_str
+        session_string=session_str,
+        device_model="SpamBot",
+        system_version="1.0",
+        app_version="1.0"
     )
     await client.start()
     print(f"[{phone}] spam worker started")
