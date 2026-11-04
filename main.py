@@ -417,11 +417,14 @@ async def select_chats(callback: CallbackQuery):
         chat = d.chat
         if chat.type in ("private", "bot"):
             continue
-        # только где можно писать
-        if hasattr(chat, "permissions") and chat.permissions:
-            if not getattr(chat.permissions, "can_send_messages", True):
-                continue
-        title = (chat.title or "Unknown")[:30]
+        title = getattr(chat, "title", None)
+        if not title or title == "Unknown":
+            continue
+        # пропускаем если точно нельзя писать
+        perms = getattr(chat, "permissions", None)
+        if perms is not None and not getattr(perms, "can_send_messages", True):
+            continue
+        title = title[:28]
         chat_id = chat.id
         mark = "✅" if chat_id in selected else "⬜"
         kb.append([InlineKeyboardButton(
