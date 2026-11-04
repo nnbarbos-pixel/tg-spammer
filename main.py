@@ -40,6 +40,10 @@ class States(StatesGroup):
     waiting_password = State()
     waiting_text = State()
     waiting_interval = State()
+    select_account_text = State()
+    select_account_interval = State()
+    select_account_chats = State()
+    select_account_delete = State()
 
 def load_data():
     global USER_DATA
@@ -68,12 +72,16 @@ def get_user(user_id: int) -> dict:
     if user_id not in USER_DATA:
         USER_DATA[user_id] = {
             "accounts": [],
-            "text": "Привет! Это тестовое сообщение.",
-            "interval": 3600,
-            "selected_chats": set(),
             "spam_tasks": {}
         }
     return USER_DATA[user_id]
+
+def get_account(user_id: int, phone: str) -> dict:
+    data = get_user(user_id)
+    for acc in data["accounts"]:
+        if acc["phone"] == phone:
+            return acc
+    return None
 
 async def is_subscribed(user_id: int) -> bool:
     try:
@@ -89,6 +97,7 @@ def main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ Добавить аккаунт"), KeyboardButton(text="📋 Аккаунты")],
+            [KeyboardButton(text="🗑 Удалить аккаунт")],
             [KeyboardButton(text="📝 Текст"), KeyboardButton(text="⏱ Интервал")],
             [KeyboardButton(text="🎯 Чаты"), KeyboardButton(text="📊 Статус")],
             [KeyboardButton(text="🚀 Старт"), KeyboardButton(text="🛑 Стоп")],
@@ -176,7 +185,10 @@ async def process_code(message: Message, state: FSMContext):
         user_data = get_user(message.from_user.id)
         user_data["accounts"].append({
             "phone": phone,
-            "session": session_string
+            "session": session_string,
+            "text": "Привет! Это тестовое сообщение.",
+            "interval": 3600,
+            "selected_chats": []
         })
         save_data()
         await message.answer(f"✅ Аккаунт {phone} добавлен.")
@@ -214,7 +226,10 @@ async def process_password(message: Message, state: FSMContext):
         user_data = get_user(message.from_user.id)
         user_data["accounts"].append({
             "phone": phone,
-            "session": session_string
+            "session": session_string,
+            "text": "Привет! Это тестовое сообщение.",
+            "interval": 3600,
+            "selected_chats": []
         })
         save_data()
         await message.answer(f"✅ Аккаунт {phone} добавлен (2FA).")
@@ -229,56 +244,111 @@ async def process_password(message: Message, state: FSMContext):
                 pass
             LOGIN_CLIENTS.pop(phone, None)
 
-# ========== Текст / Интервал ==========
+# ========== Удаление аккаунта ==========
+@router.message(F.text == "🗑 Удалить аккаунт")
+async def delete_account_start(message: Message, state: FSMContext):
+    data = get_user(message.from_user.id)
+    if not data["accounts"]:
+        return await message.answer("Нет аккаунтов.")
+    kb = [[InlineKeyboardButton(text=acc["phone"], callback_data=f"del:{acc['phone']}")] for acc in data["accounts"]]
+    await message.answer("Выбери аккаунт для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data.startswith("del:"))
+async def delete_account_confirm(callback: CallbackQuery):
+    phone = callback.data.split(":")[1]
+    data = get_user(callback.from_user.id)
+    data["accounts"] = [a for a in data["accounts"] if a["phone"] != phone]
+    if phone in data["spam_tasks"]:
+        data["spam_tasks"][phone].cancel()
+        data["spam_tasks"].pop(phone, None)
+    save_data()
+    await callback.message.edit_text(f"Аккаунт {phone} удалён.")
+    await callback.answer()
+
+# ========== Текст / Интервал (выбор аккаунта) ==========
 @router.message(F.text == "📝 Текст")
-async def set_text(message: Message, state: FSMContext):
-    await message.answer("Отправь текст рассылки:")
+async def set_text_start(message: Message, state: FSMContext):
+    data = get_user(message.from_user.id)
+    if not data["accounts"]:
+        return await message.answer("Сначала добавь аккаунт.")
+    kb = [[InlineKeyboardButton(text=acc["phone"], callback_data=f"textacc:{acc['phone']}")] for acc in data["accounts"]]
+    await message.answer("Для какого аккаунта задать текст?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data.startswith("textacc:"))
+async def set_text_select(callback: CallbackQuery, state: FSMContext):
+    phone = callback.data.split(":")[1]
+    await state.update_data(edit_phone=phone)
+    await callback.message.edit_text(f"Отправь текст для {phone}:")
     await state.set_state(States.waiting_text)
+    await callback.answer()
 
 @router.message(States.waiting_text)
 async def save_text(message: Message, state: FSMContext):
-    get_user(message.from_user.id)["text"] = message.text or ""
-    save_data()
-    await message.answer("Текст сохранён.")
+    data = await state.get_data()
+    phone = data.get("edit_phone")
+    acc = get_account(message.from_user.id, phone)
+    if acc:
+        acc["text"] = message.text or ""
+        save_data()
+        await message.answer(f"Текст для {phone} сохранён.")
     await state.clear()
 
 @router.message(F.text == "⏱ Интервал")
-async def set_interval(message: Message, state: FSMContext):
-    await message.answer(
-        "Интервал в минутах между рассылками.\n\n"
-        "Например:\n"
+async def set_interval_start(message: Message, state: FSMContext):
+    data = get_user(message.from_user.id)
+    if not data["accounts"]:
+        return await message.answer("Сначала добавь аккаунт.")
+    kb = [[InlineKeyboardButton(text=acc["phone"], callback_data=f"intacc:{acc['phone']}")] for acc in data["accounts"]]
+    await message.answer("Для какого аккаунта задать интервал?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data.startswith("intacc:"))
+async def set_interval_select(callback: CallbackQuery, state: FSMContext):
+    phone = callback.data.split(":")[1]
+    await state.update_data(edit_phone=phone)
+    await callback.message.edit_text(
+        f"Интервал в минутах для {phone}:\n\n"
         "• 1 = раз в минуту\n"
         "• 5 = раз в 5 минут\n"
-        "• 60 = раз в час\n\n"
-        "Все выбранные чаты получат сообщение раз в этот интервал.\n"
-        "Между сообщениями пауза 3-8 сек (антибан)."
+        "• 60 = раз в час"
     )
     await state.set_state(States.waiting_interval)
+    await callback.answer()
 
 @router.message(States.waiting_interval)
 async def save_interval(message: Message, state: FSMContext):
+    data = await state.get_data()
+    phone = data.get("edit_phone")
     try:
         minutes = int(message.text.strip())
         if minutes < 1:
             return await message.answer("Минимум 1 минута.")
-        get_user(message.from_user.id)["interval"] = minutes * 60
-        save_data()
-        await message.answer(f"Интервал установлен: {minutes} мин.")
+        acc = get_account(message.from_user.id, phone)
+        if acc:
+            acc["interval"] = minutes * 60
+            save_data()
+            await message.answer(f"Интервал для {phone}: {minutes} мин.")
     except ValueError:
-        await message.answer("Нужно целое число (минуты).")
+        await message.answer("Нужно целое число.")
     await state.clear()
 
 # ========== Выбор чатов ==========
 @router.message(F.text == "🎯 Чаты")
-async def select_chats(message: Message):
+async def select_chats_start(message: Message):
     data = get_user(message.from_user.id)
     if not data["accounts"]:
         return await message.answer("Сначала добавь аккаунт.")
+    kb = [[InlineKeyboardButton(text=acc["phone"], callback_data=f"chatsacc:{acc['phone']}")] for acc in data["accounts"]]
+    await message.answer("Для какого аккаунта выбрать чаты?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-    acc = data["accounts"][0]
-    phone = acc["phone"]
+@router.callback_query(F.data.startswith("chatsacc:"))
+async def select_chats(callback: CallbackQuery):
+    phone = callback.data.split(":")[1]
+    data = get_user(callback.from_user.id)
+    acc = get_account(callback.from_user.id, phone)
+    if not acc:
+        return await callback.answer("Аккаунт не найден")
+
     session_str = acc["session"]
-
     client = Client(
         f"temp_{phone.replace('+', '')}",
         api_id=API_ID,
@@ -295,10 +365,10 @@ async def select_chats(message: Message):
             dialogs.append(dialog)
     except Exception as e:
         await client.stop()
-        return await message.answer(f"Не удалось получить чаты: {e}")
+        return await callback.message.edit_text(f"Не удалось получить чаты: {e}")
 
     kb = []
-    selected = data["selected_chats"]
+    selected = set(acc.get("selected_chats", []))
     for d in dialogs:
         chat = d.chat
         if chat.type in ("private", "bot"):
@@ -308,51 +378,63 @@ async def select_chats(message: Message):
         mark = "🟢" if chat_id in selected else "⚪"
         kb.append([InlineKeyboardButton(
             text=f"{mark} {title}",
-            callback_data=f"toggle:{chat_id}"
+            callback_data=f"toggle:{phone}:{chat_id}"
         )])
     if not kb:
         await client.stop()
-        return await message.answer("Нет доступных групп/каналов.")
-    kb.append([InlineKeyboardButton(text="✅ Готово", callback_data="chats_done")])
+        return await callback.message.edit_text("Нет доступных групп/каналов.")
+    kb.append([InlineKeyboardButton(text="✅ Готово", callback_data=f"chatsdone:{phone}")])
 
-    await message.answer(
+    await callback.message.edit_text(
         f"Чаты аккаунта {phone}\nВыбери куда спамить (только группы):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
     )
     await client.stop()
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("toggle:"))
 async def toggle_chat(callback: CallbackQuery):
-    chat_id = int(callback.data.split(":")[1])
-    data = get_user(callback.from_user.id)
-    if chat_id in data["selected_chats"]:
-        data["selected_chats"].discard(chat_id)
+    parts = callback.data.split(":")
+    phone = parts[1]
+    chat_id = int(parts[2])
+    acc = get_account(callback.from_user.id, phone)
+    if not acc:
+        return await callback.answer("Аккаунт не найден")
+    selected = set(acc.get("selected_chats", []))
+    if chat_id in selected:
+        selected.discard(chat_id)
     else:
-        data["selected_chats"].add(chat_id)
+        selected.add(chat_id)
+    acc["selected_chats"] = list(selected)
     save_data()
 
     kb = []
     for row in callback.message.reply_markup.inline_keyboard:
         for btn in row:
             if btn.callback_data and btn.callback_data.startswith("toggle:"):
-                cid = int(btn.callback_data.split(":")[1])
+                cid = int(btn.callback_data.split(":")[2])
                 title = btn.text.split(" ", 1)[-1] if " " in btn.text else btn.text
-                mark = "🟢" if cid in data["selected_chats"] else "⚪"
+                mark = "🟢" if cid in selected else "⚪"
                 kb.append([InlineKeyboardButton(text=f"{mark} {title}", callback_data=btn.callback_data)])
             else:
                 kb.append([btn])
     await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback.answer()
 
-@router.callback_query(F.data == "chats_done")
+@router.callback_query(F.data.startswith("chatsdone:"))
 async def chats_done(callback: CallbackQuery):
-    count = len(get_user(callback.from_user.id)["selected_chats"])
-    await callback.message.edit_text(f"Выбрано чатов: {count}")
+    phone = callback.data.split(":")[1]
+    acc = get_account(callback.from_user.id, phone)
+    count = len(acc.get("selected_chats", [])) if acc else 0
+    await callback.message.edit_text(f"Для {phone} выбрано чатов: {count}")
     await callback.answer()
 
 # ========== Спам воркер ==========
 async def spam_worker(user_id: int, phone: str, session_str: str):
     data = get_user(user_id)
+    acc = get_account(user_id, phone)
+    if not acc:
+        return
     client = Client(
         f"spam_{phone.replace('+', '')}",
         api_id=API_ID,
@@ -366,9 +448,9 @@ async def spam_worker(user_id: int, phone: str, session_str: str):
     print(f"[{phone}] spam worker started")
     while True:
         try:
-            chats = list(data.get("selected_chats", set()))
-            text = data.get("text", "").strip()
-            interval = max(data.get("interval", 3600), 30)
+            chats = list(acc.get("selected_chats", []))
+            text = acc.get("text", "").strip()
+            interval = max(acc.get("interval", 3600), 30)
 
             if not chats or not text:
                 await asyncio.sleep(10)
@@ -385,8 +467,9 @@ async def spam_worker(user_id: int, phone: str, session_str: str):
                     await asyncio.sleep(e.value + random.randint(5, 15))
                 except (PeerFlood, UserBannedInChannel, ChatWriteForbidden) as e:
                     print(f"[{phone}] skip chat {chat_id}: {e}")
-                    data["selected_chats"].discard(chat_id)
-                    save_data()
+                    if chat_id in acc.get("selected_chats", []):
+                        acc["selected_chats"].remove(chat_id)
+                        save_data()
                 except Exception as e:
                     print(f"[{phone}] error {chat_id}: {type(e).__name__} {e}")
 
@@ -411,21 +494,21 @@ async def start_spam(message: Message):
     data = get_user(message.from_user.id)
     if not data["accounts"]:
         return await message.answer("Нет аккаунтов.")
-    if not data["selected_chats"]:
-        return await message.answer("Не выбраны чаты.")
-    if not data.get("text"):
-        return await message.answer("Нет текста.")
 
     started = 0
     for acc in data["accounts"]:
         phone = acc["phone"]
         if phone in data["spam_tasks"]:
             continue
+        if not acc.get("selected_chats") or not acc.get("text"):
+            continue
         task = asyncio.create_task(spam_worker(message.from_user.id, phone, acc["session"]))
         data["spam_tasks"][phone] = task
         started += 1
 
-    await message.answer(f"Запущено воркеров: {started}\nИнтервал: {data.get('interval', 3600)//60} мин")
+    if started == 0:
+        return await message.answer("Нет аккаунтов с настроенными чатами и текстом.")
+    await message.answer(f"Запущено воркеров: {started}")
 
 @router.message(F.text == "🛑 Стоп")
 async def stop_spam(message: Message):
@@ -440,26 +523,26 @@ async def list_accounts(message: Message):
     accs = get_user(message.from_user.id)["accounts"]
     if not accs:
         return await message.answer("Нет аккаунтов. Добавь через «➕ Добавить аккаунт».")
-    text = "\n".join([f"• {a['phone']}" for a in accs])
-    await message.answer(f"Аккаунты ({len(accs)}/{MAX_ACCOUNTS}):\n{text}")
+    lines = []
+    for a in accs:
+        chats = len(a.get("selected_chats", []))
+        interval = a.get("interval", 3600) // 60
+        lines.append(f"• {a['phone']} — чатов: {chats}, интервал: {interval} мин")
+    await message.answer(f"Аккаунты ({len(accs)}/{MAX_ACCOUNTS}):\n" + "\n".join(lines))
 
 @router.message(F.text == "📊 Статус")
 async def status(message: Message):
     data = get_user(message.from_user.id)
     tasks = data.get("spam_tasks", {})
     running = len(tasks)
-    chats = len(data.get("selected_chats", set()))
-    interval_min = data.get("interval", 3600) // 60
-    txt = data.get("text", "")
-    text_preview = (txt[:40] + "...") if len(txt) > 40 else (txt or "не задан")
-    await message.answer(
-        f"Статус:\n\n"
-        f"Аккаунтов: {len(data['accounts'])}\n"
-        f"Выбрано чатов: {chats}\n"
-        f"Интервал: {interval_min} мин\n"
-        f"Текст: {text_preview}\n"
-        f"Воркеров запущено: {running}"
-    )
+    lines = [f"Воркеров запущено: {running}\n"]
+    for acc in data["accounts"]:
+        chats = len(acc.get("selected_chats", []))
+        interval = acc.get("interval", 3600) // 60
+        txt = acc.get("text", "")
+        preview = (txt[:30] + "...") if len(txt) > 30 else (txt or "не задан")
+        lines.append(f"{acc['phone']}: чатов {chats}, интервал {interval} мин, текст: {preview}")
+    await message.answer("\n".join(lines) if lines else "Нет аккаунтов.")
 
 dp.include_router(router)
 
