@@ -162,8 +162,11 @@ async def process_phone(message: Message, state: FSMContext):
     try:
         sent = await client.send_code(phone)
         LOGIN_CLIENTS[phone] = client
-        await state.update_data(phone_code_hash=sent.phone_code_hash)
-        await message.answer(f"Код отправлен на {phone}. Введи код:")
+        await state.update_data(phone_code_hash=sent.phone_code_hash, code_input="")
+        await message.answer(
+            f"Код отправлен на {phone}.\n\nВведи код кнопками ниже:",
+            reply_markup=code_keyboard()
+        )
         await state.set_state(States.waiting_code)
     except Exception as e:
         await message.answer(f"Ошибка отправки кода: {e}\nПопробуй другой формат или номер.")
@@ -172,44 +175,85 @@ async def process_phone(message: Message, state: FSMContext):
 
 @router.message(States.waiting_code)
 async def process_code(message: Message, state: FSMContext):
+    # игнорируем текстовый ввод, используем только кнопки
+    await message.answer("Используй кнопки ниже для ввода кода.")
+
+def code_keyboard(current: str = "") -> InlineKeyboardMarkup:
+    digits = [
+        ["1", "2", "3"],
+        ["4", "5", "6"],
+        ["7", "8", "9"],
+        ["⌫", "0", "✓"]
+    ]
+    kb = []
+    for row in digits:
+        kb.append([
+            InlineKeyboardButton(text=d, callback_data=f"code:{d}")
+            for d in row
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+@router.callback_query(F.data.startswith("code:"))
+async def code_input(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    phone = data["phone"]
-    client = LOGIN_CLIENTS.get(phone)
-    if not client:
-        await message.answer("Сессия потеряна. Начни добавление заново.")
-        await state.clear()
-        return
-    try:
-        await client.sign_in(phone, data["phone_code_hash"], message.text.strip())
-        session_string = await client.export_session_string()
-        user_data = get_user(message.from_user.id)
-        user_data["accounts"].append({
-            "phone": phone,
-            "session": session_string,
-            "text": "Привет! Это тестовое сообщение.",
-            "interval": 3600,
-            "selected_chats": []
-        })
-        save_data()
-        await message.answer(f"✅ Аккаунт {phone} добавлен.")
-        await state.clear()
-    except SessionPasswordNeeded:
-        await message.answer("Введи пароль 2FA:")
-        await state.set_state(States.waiting_password)
-        return
-    except (PhoneCodeExpired, PhoneCodeInvalid) as e:
-        await message.answer(f"Код неверный или протух: {e}\nНачни добавление заново.")
-        await state.clear()
-    except Exception as e:
-        await message.answer(f"Ошибка входа: {e}")
-        await state.clear()
-    finally:
-        if phone in LOGIN_CLIENTS and not isinstance(locals().get('e'), SessionPasswordNeeded):
-            try:
+    phone = data.get("phone")
+    current = data.get("code_input", "")
+    action = callback.data.split(":")[1]
+
+    if action == "⌫":
+        current = current[:-1]
+    elif action == "✓":
+        if len(current) < 4:
+            return await callback.answer("Слишком короткий код")
+        # логинимся
+        client = LOGIN_CLIENTS.get(phone)
+        if not client:
+            await callback.message.edit_text("Сессия потеряна. Начни заново.")
+            await state.clear()
+            return await callback.answer()
+        try:
+            await client.sign_in(phone, data["phone_code_hash"], current)
+            session_string = await client.export_session_string()
+            user_data = get_user(callback.from_user.id)
+            user_data["accounts"].append({
+                "phone": phone,
+                "session": session_string,
+                "text": "Привет! Это тестовое сообщение.",
+                "interval": 3600,
+                "selected_chats": []
+            })
+            save_data()
+            await callback.message.edit_text(f"✅ Аккаунт {phone} добавлен.")
+            await state.clear()
+            if phone in LOGIN_CLIENTS:
                 await client.disconnect()
-            except:
-                pass
-            LOGIN_CLIENTS.pop(phone, None)
+                LOGIN_CLIENTS.pop(phone, None)
+        except SessionPasswordNeeded:
+            await callback.message.edit_text("Введи пароль 2FA обычным сообщением:")
+            await state.set_state(States.waiting_password)
+        except Exception as e:
+            await callback.message.edit_text(f"Ошибка: {e}\nНачни заново.")
+            await state.clear()
+            if phone in LOGIN_CLIENTS:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+                LOGIN_CLIENTS.pop(phone, None)
+        return await callback.answer()
+    else:
+        if len(current) >= 6:
+            return await callback.answer("Максимум 6 цифр")
+        current += action
+
+    await state.update_data(code_input=current)
+    display = current if current else "—"
+    await callback.message.edit_text(
+        f"Код для {phone}:\n\n`{display}`\n\nНажимай цифры, потом ✓",
+        reply_markup=code_keyboard(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
 
 @router.message(States.waiting_password)
 async def process_password(message: Message, state: FSMContext):
