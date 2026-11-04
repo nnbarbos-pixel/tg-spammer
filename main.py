@@ -36,6 +36,8 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 # user_id -> data
 USER_DATA: Dict[int, dict] = {}
+# phone -> client (для логина, чтобы код не протухал)
+LOGIN_CLIENTS: Dict[str, TelegramClient] = {}
 
 class States(StatesGroup):
     waiting_phone = State()
@@ -130,6 +132,9 @@ async def add_account_start(message: Message, state: FSMContext):
     await message.answer("Введи номер в любом формате (+95..., 9596..., с пробелами и т.д.):")
     await state.set_state(States.waiting_phone)
 
+# храним активные клиенты для логина
+LOGIN_CLIENTS: Dict[str, TelegramClient] = {}
+
 @router.message(States.waiting_phone)
 async def process_phone(message: Message, state: FSMContext):
     raw = message.text or ""
@@ -146,27 +151,26 @@ async def process_phone(message: Message, state: FSMContext):
     await client.connect()
     try:
         sent = await client.send_code_request(phone)
-        # сохраняем сессию сразу, чтобы не терять при рестарте
-        session_str = client.session.save()
-        await state.update_data(
-            phone_code_hash=sent.phone_code_hash,
-            session_str=session_str
-        )
+        # держим клиент живым до ввода кода
+        LOGIN_CLIENTS[phone] = client
+        await state.update_data(phone_code_hash=sent.phone_code_hash)
         await message.answer(f"Код отправлен на {phone}. Введи код:")
         await state.set_state(States.waiting_code)
     except Exception as e:
         await message.answer(f"Ошибка отправки кода: {e}\nПопробуй другой формат или номер.")
         await state.clear()
-    finally:
         await client.disconnect()
 
 @router.message(States.waiting_code)
 async def process_code(message: Message, state: FSMContext):
     data = await state.get_data()
     phone = data["phone"]
-    session_str = data.get("session_str", "")
-    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-    await client.connect()
+    client = LOGIN_CLIENTS.get(phone)
+    if not client:
+        await message.answer("Сессия потеряна (бот перезапустился). Начни заново.")
+        await state.clear()
+        return
+    need_2fa = False
     try:
         await client.sign_in(phone, message.text.strip(), phone_code_hash=data["phone_code_hash"])
         final_session = client.session.save()
@@ -179,23 +183,26 @@ async def process_code(message: Message, state: FSMContext):
         await message.answer(f"✅ Аккаунт {phone} добавлен.")
         await state.clear()
     except SessionPasswordNeededError:
+        need_2fa = True
         await message.answer("Введи пароль 2FA:")
         await state.set_state(States.waiting_password)
-        # сохраняем обновлённую сессию для 2FA
-        await state.update_data(session_str=client.session.save())
     except Exception as e:
         await message.answer(f"Ошибка входа: {e}")
         await state.clear()
     finally:
-        await client.disconnect()
+        if not need_2fa and phone in LOGIN_CLIENTS:
+            await client.disconnect()
+            LOGIN_CLIENTS.pop(phone, None)
 
 @router.message(States.waiting_password)
 async def process_password(message: Message, state: FSMContext):
     data = await state.get_data()
     phone = data["phone"]
-    session_str = data.get("session_str", "")
-    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-    await client.connect()
+    client = LOGIN_CLIENTS.get(phone)
+    if not client:
+        await message.answer("Сессия потеряна. Начни заново.")
+        await state.clear()
+        return
     try:
         await client.sign_in(password=message.text)
         final_session = client.session.save()
@@ -210,7 +217,9 @@ async def process_password(message: Message, state: FSMContext):
         await message.answer(f"Ошибка: {e}")
     finally:
         await state.clear()
-        await client.disconnect()
+        if phone in LOGIN_CLIENTS:
+            await client.disconnect()
+            LOGIN_CLIENTS.pop(phone, None)
 
 # ========== Текст / Интервал ==========
 @router.message(F.text == "📝 Текст")
